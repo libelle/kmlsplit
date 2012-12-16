@@ -3,20 +3,27 @@
 /*
 Sketchy KML splitter
 */
-$debug = false;
+$options = array('t'=>1800,'d'=>0.5,'m'=>5);
+
+
 if (count($argv) == 1) 
 {
+    echo "Sketchy KML splitter. Breaks a long track into smaller tracks based\n";
+    echo "on time or distance between successive samples.\n";
     echo "Usage:\n";
-    echo "kmlsplit.php [filespec]\n";
+    echo "kmlsplit.php [-t seconds for split] [-h hours for split] [-m max realistic speed] [-z time zone (delta from UTF)][-d distance to split] -f KML filespec\n";
+    echo "defaults:\n";
+    foreach ($options as $k=>$v)
+    echo "-$k = $v\n";
 }
-if (count($argv) < 2) 
+$options = getopt('t::d::h::m::z::f:');
+print_r($options);
+$spec = $options['f'];
+if (isset($options['h'])) 
 {
-    $spec = getline("KML file to process: ");
+    $options['t'] = $options['h'] * 3600;
 }
-else
-{
-    $spec = $argv[1];
-}
+
 if (!file_exists($spec)) 
 {
     echo "Can't read $spec\n";
@@ -47,11 +54,16 @@ foreach ($track as $tt)
     if (isset($tt->TimeStamp->when)) 
     {
         $ts = new DateTime($tt->TimeStamp->when);
+        if (isset($tt->Point)) 
+        {
+            $pt = explode(",", $tt->Point->coordinates);
+            $lon = $pt[0];
+            $lat = $pt[1];
+        }
         if ($prev != false) 
         {
             $timed = $ts->getTimestamp() - $prev->getTimestamp();
-            if ($timed > 1800) // 0.5 hr
-            
+            if ($timed > $options['t']) 
             {
                 // split
                 $tracks[$count]['name'] = count($tracks[$count]['points']) . ' points, split due to time delta: ' . $timed . 's';
@@ -59,34 +71,24 @@ foreach ($track as $tt)
                 $prev = false;
                 $tracks[$count]['points'] = array();
             }
-        }
-        else
-        {
-            // delta distance
-            if (isset($tt->Point)) 
+            else if ($prevlat !== false && $prevlon !== false) 
             {
-                $pt = explode(",", $tt->Point->coordinates);
-                $lon = $pt[0];
-                $lat = $pt[1];
-                if ($prevlat !== false && $prevlon !== false) 
+                // delta distance
+                $dist = milesBetween($prevlat, $prevlon, $lat, $lon);
+                if ($dist > $options['d']) 
                 {
-                    $dist = milesBetween($prevlat, $prevlon, $lat, $lon);
-                    if ($dist > 0.5) // > 0.5 miles
-                    
-                    {
-                        // split
-                        $tracks[$count]['name'] = count($tracks[$count]['points']) . ' points, split due to gap of: ' . $dist . ' miles';
-                        $count+= 1;
-                        $prevlat = false;
-                        $prevlon = false;
-                        $tracks[$count]['points'] = array();
-                    }
+                    // split
+                    $tracks[$count]['name'] = count($tracks[$count]['points']) . ' points, split due to gap of: ' . $dist . ' miles';
+                    $count+= 1;
+                    $prevlat = false;
+                    $prevlon = false;
+                    $tracks[$count]['points'] = array();
                 }
             }
-            $prev = $ts;
-            $prevlat = $lat;
-            $prevlon = $lon;
         }
+        $prevlat = $lat;
+        $prevlon = $lon;
+        $prev = $ts;
         $tracks[$count]['points'][] = $tt;
     }
 }
@@ -136,6 +138,50 @@ function kml_waypoints($wp)
     $ret.= "\t</Folder>\n";
     return $ret;
 }
+
+function analyzePoint($d)
+{
+    $speed = false;
+    $heading = false;
+    if (isset($d->Point)) 
+    {
+        $pt = explode(",", $d->Point->coordinates);
+        $lon = $pt[0];
+        $lat = $pt[1];
+        $alt = $pt[2];
+    }
+    else
+    {
+        return false;
+    }
+    if (isset($d->TimeStamp->when))
+    {
+    $time = new DateTime($d->TimeStamp->when);
+    }
+    else
+    {
+        return false;
+    }
+
+    $matches = array();
+    if (preg_match('/Speed:\s([\d.]+)/', $d, $matches)) 
+    {
+        $speed = $matches[1];
+    }
+    $matches = array();
+    if (preg_match('/Heading:\s([\d.]+)/', $d, $matches)) 
+    {
+        $heading = $matches[1];
+    }
+    return array(
+        'lat'=>$lat,
+        'lon'=>$lon,
+        'alt'=>$alt,
+        'speed'=>$speed,
+        'heading'=>$heading,
+    );
+}
+
 function getHeadingAndSpeed($d) 
 {
     $speed = false;
@@ -236,7 +282,7 @@ function kml_tracks($tracks)
         $det = analyzeTrack($tt);
         if ($det['points'] > 2) 
         {
-           $tname = 'TRACK'.$trackno;
+            $tname = 'TRACK' . $trackno;
             $ret.= "\t\t\t<Placemark>\n";
             $ret.= "\t\t\t\t<name>" . htmlentities($tname) . "</name>\n";
             $ret.= "\t\t\t<description>\n";
@@ -318,11 +364,10 @@ function kml_tracks($tracks)
                 }
                 $scount+= 1;
             }
-            $trackno += 1;
+            $trackno+= 1;
             $ret.= "</Folder>\n";
             $ret.= "</Folder>\n";
         }
-    
     }
     $ret.= "\t</Folder>\n";
     return $ret;
