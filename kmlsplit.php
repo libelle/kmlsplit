@@ -1,27 +1,42 @@
 #!/usr/bin/env php
 <?php
+define('ZULU', 'Y-m-d\TH:i:s\Z');
+date_default_timezone_set('GMT');
 /*
 Sketchy KML splitter
 */
-$options = array('t'=>1800,'d'=>0.5,'m'=>5);
-
-
+$opt_def = array(
+    't' => 1800,
+    'd' => 0.5,
+    'm' => 5
+);
 if (count($argv) == 1) 
 {
     echo "Sketchy KML splitter. Breaks a long track into smaller tracks based\n";
     echo "on time or distance between successive samples.\n";
     echo "Usage:\n";
-    echo "kmlsplit.php [-t seconds for split] [-h hours for split] [-m max realistic speed] [-z time zone (delta from UTF)][-d distance to split] -f KML filespec\n";
+    echo "kmlsplit.php [-t seconds for split] [-h hours for split] [-m max realistic speed] [-z time zone][-d distance to split] -f KML filespec\n";
     echo "defaults:\n";
-    foreach ($options as $k=>$v)
-    echo "-$k = $v\n";
+    foreach ($opt_def as $k => $v) echo "-$k = $v\n";
 }
 $options = getopt('t::d::h::m::z::f:');
-print_r($options);
 $spec = $options['f'];
 if (isset($options['h'])) 
 {
     $options['t'] = $options['h'] * 3600;
+}
+foreach ($opt_def as $k => $v) 
+{
+    if (!isset($options[$k])) 
+    {
+        $options[$k] = $v;
+    }
+}
+$timezone = new DateTimeZone('GMT');
+if (isset($options['z'])) 
+{
+    echo "Using localtime zone: ".$options['z']."\n";
+    $timezone = new DateTimeZone($options['z']);
 }
 
 if (!file_exists($spec)) 
@@ -50,19 +65,13 @@ $count = 0;
 $tracks[$count]['points'] = array();
 foreach ($track as $tt) 
 {
-    //print_r($tt);
-    if (isset($tt->TimeStamp->when)) 
+    $tp = analyzePoint($tt, $timezone);
+    if ($tp !== false && $tp['speed'] < $options['m']) 
     {
-        $ts = new DateTime($tt->TimeStamp->when);
-        if (isset($tt->Point)) 
-        {
-            $pt = explode(",", $tt->Point->coordinates);
-            $lon = $pt[0];
-            $lat = $pt[1];
-        }
+        // valid, and less than realistic speed measure
         if ($prev != false) 
         {
-            $timed = $ts->getTimestamp() - $prev->getTimestamp();
+            $timed = $tp['time']->getTimestamp() - $prev->getTimestamp();
             if ($timed > $options['t']) 
             {
                 // split
@@ -74,7 +83,7 @@ foreach ($track as $tt)
             else if ($prevlat !== false && $prevlon !== false) 
             {
                 // delta distance
-                $dist = milesBetween($prevlat, $prevlon, $lat, $lon);
+                $dist = milesBetween($prevlat, $prevlon, $tp['lat'], $tp['lon']);
                 if ($dist > $options['d']) 
                 {
                     // split
@@ -86,27 +95,38 @@ foreach ($track as $tt)
                 }
             }
         }
-        $prevlat = $lat;
-        $prevlon = $lon;
-        $prev = $ts;
-        $tracks[$count]['points'][] = $tt;
+        $prevlat = $tp['lat'];
+        $prevlon = $tp['lon'];
+        $prev = $tp['time'];
+        $tracks[$count]['points'][] = $tp;
     }
 }
-writeKML('0', $waypoints, $tracks);
-function writeKML($count, $waypoints, $tracks) 
+writeKML('0', $waypoints, $tracks, $options);
+echo "Split data into " . count($tracks) . " tracks.\n";
+exit;
+function writeKML($count, $waypoints, $tracks, $options)
 {
     $name = 'split_track_' . $count;
     $fh = fopen($name . '.kml', 'w') or die("Can't open file: " . $name . '.kml');
-    fwrite($fh, kml_header($count));
+    fwrite($fh, kml_header($count,$options));
     fwrite($fh, kml_styles());
     fwrite($fh, kml_waypoints($waypoints));
     fwrite($fh, kml_tracks($tracks));
     fwrite($fh, kml_footer());
     fclose($fh);
 }
-function kml_header($count) 
+function kml_header($count, $opts)
 {
-    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?" . ">\n<kml xmlns=\"http://www.opengis.net/kml/2.2\"\n" . "\txmlns:gx=\"http://www.google.com/kml/ext/2.2\">\n" . "\t<Document>\n" . "\t<name>GPS device/split track</name>\n" . "\t<snippet>Converted " . date('Y-m-d H:i:s') . "</snippet>\n";
+    $ret = "<?xml version=\"1.0\" encoding=\"UTF-8\"?" . ">\n<kml xmlns=\"http://www.opengis.net/kml/2.2\"\n";
+    $ret .= "\txmlns:gx=\"http://www.google.com/kml/ext/2.2\">\n" . "\t<Document>\n";
+    $ret .= "\t<name>GPS device/split track</name>\n" . "\t<snippet>Converted " . date('Y-m-d H:i:s');
+    $ret .= "\nUsing params:";
+    foreach ($opts as $k=>$v)
+    {
+        $ret .= "-".$k."=".$v."\n";
+    }
+    $ret .= "</snippet>\n";
+    return $ret;
 }
 function kml_footer() 
 {
@@ -138,11 +158,13 @@ function kml_waypoints($wp)
     $ret.= "\t</Folder>\n";
     return $ret;
 }
-
-function analyzePoint($d)
+function analyzePoint($d, $timezone) 
 {
     $speed = false;
     $heading = false;
+    $lookatlat = false;
+    $lookatlon = false;
+    $lookattilt = false;
     if (isset($d->Point)) 
     {
         $pt = explode(",", $d->Point->coordinates);
@@ -154,51 +176,47 @@ function analyzePoint($d)
     {
         return false;
     }
-    if (isset($d->TimeStamp->when))
+    if (isset($d->TimeStamp->when)) 
     {
-    $time = new DateTime($d->TimeStamp->when);
+        $time = new DateTime($d->TimeStamp->when);
+        $local = new DateTime($d->TimeStamp->when);
+        $local->setTimezone($timezone);
     }
     else
     {
         return false;
     }
-
-    $matches = array();
-    if (preg_match('/Speed:\s([\d.]+)/', $d, $matches)) 
+    if (isset($d->LookAt)) 
     {
-        $speed = $matches[1];
+        $lookatlon = '' . $d->LookAt->longitude;
+        $lookatlat = '' . $d->LookAt->latitude;
+        $lookattilt = '' . $d->LookAt->tilt;
     }
     $matches = array();
-    if (preg_match('/Heading:\s([\d.]+)/', $d, $matches)) 
+    if (isset($d->description[0])) 
     {
-        $heading = $matches[1];
-    }
-    return array(
-        'lat'=>$lat,
-        'lon'=>$lon,
-        'alt'=>$alt,
-        'speed'=>$speed,
-        'heading'=>$heading,
-    );
-}
-
-function getHeadingAndSpeed($d) 
-{
-    $speed = false;
-    $heading = false;
-    $matches = array();
-    if (preg_match('/Speed:\s([\d.]+)/', $d, $matches)) 
-    {
-        $speed = $matches[1];
-    }
-    $matches = array();
-    if (preg_match('/Heading:\s([\d.]+)/', $d, $matches)) 
-    {
-        $heading = $matches[1];
+        $pd = $d->description[0];
+        if (preg_match('/Speed:\s([\d.]+)/', $pd, $matches)) 
+        {
+            $speed = $matches[1];
+        }
+        $matches = array();
+        if (preg_match('/Heading:\s([\d.]+)/', $pd, $matches)) 
+        {
+            $heading = $matches[1];
+        }
     }
     return array(
-        $speed,
-        $heading
+        'time' => $time,
+        'localtime' => $local,
+        'lat' => $lat,
+        'lon' => $lon,
+        'alt' => $alt,
+        'speed' => $speed,
+        'heading' => $heading,
+        'la_lat' => $lookatlat,
+        'la_lon' => $lookatlon,
+        'la_tilt' => $lookattilt
     );
 }
 function analyzeTrack($track) 
@@ -213,51 +231,45 @@ function analyzeTrack($track)
     $prevalt = false;
     $start = false;
     $stop = false;
+    $lstart = false;
+    $lstop = false;
     $minspeed = 100000;
     $maxspeed = 0;
     $points = 0;
     foreach ($track['points'] as $tp) 
     {
-        if (isset($tp->description)) 
+        if ($tp['speed'] !== false && $tp['speed'] < $minspeed) $minspeed = $tp['speed'];
+        if ($tp['speed'] !== false && $tp['speed'] > $maxspeed) $maxspeed = $tp['speed'];
+        if ($start === false) $start = $tp['time'];
+        $stop = $tp['time'];
+        if ($lstart === false) $lstart = $tp['localtime'];
+        $lstop = $tp['localtime'];
+        if ($prevlat !== false && $prevlon !== false) 
         {
-            list($speed, $heading) = getHeadingAndSpeed($tp->description[0]);
-            if ($speed !== false && $speed < $minspeed) $minspeed = $speed;
-            if ($speed !== false && $speed > $maxspeed) $maxspeed = $speed;
-        }
-        if (isset($tp->Point)) 
-        {
-            if ($start === false) $start = $tp->TimeStamp->when;
-            $stop = $tp->TimeStamp->when;
-            $pt = explode(",", $tp->Point->coordinates);
-            if ($prevlat !== false && $prevlon !== false) 
+            $dist+= milesBetween($prevlat, $prevlon, $tp['lat'], $tp['lon']);
+            if ($prevalt < $tp['alt']) 
             {
-                $dist+= milesBetween($prevlat, $prevlon, $pt[1], $pt[0]);
-                if ($prevalt < $pt[2]) 
-                {
-                    $gain+= $pt[2] - $prevalt;
-                }
-                else
-                {
-                    $loss+= $pt[2] - $prevalt;
-                }
-                if ($pt[2] > $maxalt) 
-                {
-                    $maxalt = $pt[2];
-                }
-                else if ($pt[2] < $minalt) 
-                {
-                    $minalt = $pt[2];
-                }
+                $gain+= $tp['alt'] - $prevalt;
             }
-            $prevlat = $pt[1];
-            $prevlon = $pt[0];
-            $prevalt = $pt[2];
-            $points+= 1;
+            else
+            {
+                $loss+= $tp['alt'] - $prevalt;
+            }
+            if ($tp['alt'] > $maxalt) 
+            {
+                $maxalt = $tp['alt'];
+            }
+            else if ($tp['alt'] < $minalt) 
+            {
+                $minalt = $tp['alt'];
+            }
         }
+        $prevlat = $tp['lat'];
+        $prevlon = $tp['lon'];
+        $prevalt = $tp['alt'];
+        $points+= 1;
     }
-    $startdt = new DateTime($start);
-    $stopdt = new DateTime($stop);
-    $dur = $stopdt->diff($startdt);
+    $dur = $stop->diff($start);
     return array(
         'points' => $points,
         'dist' => $dist,
@@ -267,10 +279,16 @@ function analyzeTrack($track)
         'maxalt' => $maxalt,
         'maxspeed' => $maxspeed,
         'minspeed' => $minspeed,
-        'start' => $start,
-        'stop' => $stop,
+        'start' => $start->format('Y-m-d H:i:s'),
+        'stop' => $stop->format('Y-m-d H:i:s'),
+        'lstart' => $lstart->format('Y-m-d H:i:s'),
+        'lstop' => $lstop->format('Y-m-d H:i:s'),
         'duration' => $dur->format('%H hours, %i minutes, %s seconds')
     );
+}
+function kml_coord($pt, $delim = ',') 
+{
+    return $pt['lon'] . $delim . $pt['lat'] . $delim . $pt['alt'];
 }
 function kml_tracks($tracks) 
 {
@@ -287,7 +305,7 @@ function kml_tracks($tracks)
             $ret.= "\t\t\t\t<name>" . htmlentities($tname) . "</name>\n";
             $ret.= "\t\t\t<description>\n";
             $ret.= "<![CDATA[<table>\n";
-            $ret.= "<tr><td colspan=2>" . $det['start'] . "</td><tr>\n";
+            $ret.= "<tr><td colspan=2>" . $det['lstart'] . "</td><tr>\n";
             $ret.= "<tr><td colspan=2>" . htmlentities($tt['name']) . "</td><tr>\n";
             $ret.= "<tr><td><b>Data Points</b> " . $det['points'] . "</td></tr>\n";
             $ret.= "<tr><td><b>Distance</b> " . $det['dist'] . " mi </td></tr>\n";
@@ -298,11 +316,11 @@ function kml_tracks($tracks)
             $ret.= "\t\t\t\t<gx:Track>\n";
             foreach ($tt['points'] as $tp) 
             {
-                $ret.= "\t\t\t\t\t<when>" . $tp->TimeStamp->when . "</when>\n";
+                $ret.= "\t\t\t\t\t<when>" . $tp['time']->format(ZULU) . "</when>\n";
             }
             foreach ($tt['points'] as $tp) 
             {
-                $ret.= "\t\t\t\t\t<gx:coord>" . $tp->Point->coordinates . "</gx:coord>\n";
+                $ret.= "\t\t\t\t\t<gx:coord>" . kml_coord($tp, ' ') . "</gx:coord>\n";
             }
             $ret.= "\t\t\t\t</gx:Track>\n\t\t\t</Placemark>\n";
             $ret.= "\t\t<Folder>\n";
@@ -318,8 +336,10 @@ function kml_tracks($tracks)
             $ret.= "<tr><td><b>Cumul. Alt. Loss</b> " . $det['loss'] . " ft </td></tr>\n";
             $ret.= "<tr><td><b>Max Speed</b> " . $det['maxspeed'] . " mph </td></tr>\n";
             $ret.= "<tr><td><b>Min Speed</b> " . $det['minspeed'] . " mph </td></tr>\n";
-            $ret.= "<tr><td><b>Start Time</b> " . $det['start'] . "  </td></tr>\n";
-            $ret.= "<tr><td><b>End Time</b> " . $det['stop'] . "</td></tr>\n";
+            $ret.= "<tr><td><b>Start Time</b> " . $det['start'] . "  UTC</td></tr>\n";
+            $ret.= "<tr><td><b>End Time</b> " . $det['stop'] . " UTC</td></tr>\n";
+            $ret.= "<tr><td><b>Start Time (local)</b> " . $det['lstart'] . "  </td></tr>\n";
+            $ret.= "<tr><td><b>End Time (local)</b> " . $det['lstop'] . "</td></tr>\n";
             $ret.= "<tr><td><b>Data Points</b> " . $det['points'] . "</td></tr>\n";
             $ret.= "<tr><td><b>Duration</b> " . $det['duration'] . "</td></tr>\n";
             $ret.= "</table>]]>\n";
@@ -333,35 +353,31 @@ function kml_tracks($tracks)
             $scount = 0;
             foreach ($tt['points'] as $tp) 
             {
-                if (isset($tp->Point)) 
-                {
-                    $ret.= "\t\t\t\t<Placemark>\n";
-                    $ret.= "\t\t\t\t<name>" . htmlentities($tname . '-' . $scount) . "</name>\n";
-                    $ret.= "\t\t\t\t<snippet/>\n";
-                    list($speed, $heading) = getHeadingAndSpeed($tp->description[0]);
-                    $ret.= "\t\t\t\t<description><![CDATA[\n";
-                    $ret.= "<table>\n";
-                    $pt = explode(",", $tp->Point->coordinates);
-                    $ret.= "<tr><td>Longitude: " . $pt[0] . " </td></tr>\n";
-                    $ret.= "<tr><td>Latitude: " . $pt[1] . " </td></tr>\n";
-                    $ret.= "<tr><td>Altitude: " . $pt[2] . " ft </td></tr>\n";
-                    if ($speed !== false) $ret.= "<tr><td>Speed: " . $speed . " mph </td></tr>\n";
-                    if ($heading !== false) $ret.= "<tr><td>Heading: " . $heading . " </td></tr>\n";
-                    $ret.= "<tr><td>Time: " . $tp->TimeStamp->when . " </td></tr>\n";
-                    $ret.= "</table>\n";
-                    $ret.= "\t\t\t\t]]></description>\n";
-                    $ret.= "\t\t\t\t<LookAt>\n";
-                    $ret.= "\t\t\t\t\t<longitude>" . $tp->LookAt->longitude . "</longitude>\n";
-                    $ret.= "\t\t\t\t\t<latitude>" . $tp->LookAt->latitude . "</latitude>\n";
-                    $ret.= "\t\t\t\t\t<tilt>" . $tp->LookAt->tile . "</tilt>\n";
-                    $ret.= "\t\t\t\t</LookAt>\n";
-                    $ret.= "\t\t\t\t<TimeStamp><when>" . $tp->TimeStamp->when . "</when></TimeStamp>\n";
-                    $ret.= "\t\t\t\t<styleUrl>#track</styleUrl>\n";
-                    $ret.= "\t\t\t\t<Point>\n";
-                    $ret.= "\t\t\t\t\t<coordinates>" . $tp->Point->coordinates . "</coordinates>\n";
-                    $ret.= "\t\t\t\t</Point>\n";
-                    $ret.= "\t\t\t\t</Placemark>\n";
-                }
+                $ret.= "\t\t\t\t<Placemark>\n";
+                $ret.= "\t\t\t\t<name>" . htmlentities($tname . '-' . $scount) . "</name>\n";
+                $ret.= "\t\t\t\t<snippet/>\n";
+                $ret.= "\t\t\t\t<description><![CDATA[\n";
+                $ret.= "<table>\n";
+                $ret.= "<tr><td>Longitude: " . $tp['lon'] . " </td></tr>\n";
+                $ret.= "<tr><td>Latitude: " . $tp['lat'] . " </td></tr>\n";
+                $ret.= "<tr><td>Altitude: " . $tp['alt'] . " ft </td></tr>\n";
+                if ($tp['speed'] !== false) $ret.= "<tr><td>Speed: " . $tp['speed'] . " mph </td></tr>\n";
+                if ($tp['heading'] !== false) $ret.= "<tr><td>Heading: " . $tp['heading'] . " </td></tr>\n";
+                $ret.= "<tr><td>Time: " . $tp['time']->format(ZULU) . " UTC </td></tr>\n";
+                $ret.= "<tr><td>Local Time: " . $tp['localtime']->format('Y-m-d H:i:s') . " </td></tr>\n";
+                $ret.= "</table>\n";
+                $ret.= "\t\t\t\t]]></description>\n";
+                $ret.= "\t\t\t\t<LookAt>\n";
+                $ret.= "\t\t\t\t\t<longitude>" . $tp['la_lon'] . "</longitude>\n";
+                $ret.= "\t\t\t\t\t<latitude>" . $tp['la_lat'] . "</latitude>\n";
+                $ret.= "\t\t\t\t\t<tilt>" . $tp['la_tilt'] . "</tilt>\n";
+                $ret.= "\t\t\t\t</LookAt>\n";
+                $ret.= "\t\t\t\t<TimeStamp><when>" . $tp['time']->format(ZULU) . "</when></TimeStamp>\n";
+                $ret.= "\t\t\t\t<styleUrl>#track</styleUrl>\n";
+                $ret.= "\t\t\t\t<Point>\n";
+                $ret.= "\t\t\t\t\t<coordinates>" . kml_coord($tp) . "</coordinates>\n";
+                $ret.= "\t\t\t\t</Point>\n";
+                $ret.= "\t\t\t\t</Placemark>\n";
                 $scount+= 1;
             }
             $trackno+= 1;

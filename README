@@ -1,0 +1,33 @@
+kmlsplit.php
+
+This is a quick and (very) dirty little script I wrote to solve a specific problem. It may or may not be useful
+for any application. No promises made!
+
+Problem:
+When traveling or hiking, I use a Garmin GPSMap 60Cx to log a track. When I get home, I use GPS Babel to transfer
+the data and convert it into a .kml file, suitable for use in Google Earth for mapping / visualizing. However,
+if you just extract the Active Track from the 60Cx, you may end up with one long track that contains multiple
+days of hiking into a single track. Also, if you find yourself in an area where the signal is poor, you might
+find sudden elevation and/or position jumps that really screw up the track.
+
+This script is design to break the active track into separate tracks based either on a gap in position (e.g., you
+went on a hike, turned off the GPS, drove somewhere, went on another hike) or a gap in time (e.g., you hiked to
+a destination, turned off the GPS, and the next day hiked on to another location). It does some computation
+to give nice metadata read out about the tracks, and, if passed a time zone, will localize the times.
+
+Usage:
+
+kmlsplit.php -f[filename] [-t seconds] [-h hours] [-d distance] [-m max speed] [-z time zone]
+
+[filename] is your .kml track file
+[seconds] is the maximum number of seconds between data points before the script will split the track.
+    In other words, so long as data points are less than [seconds] seconds apart, they get added to the same
+    track. If two points are more than [seconds] seconds apart, the old track is ended and a new one begun.
+[hours] is a shortcut for [seconds] if you're wanting to avoid multiplying by 3600. Use [seconds] or [hours]
+    but don't use both.
+[distance] is the maximum distance between data points before the script will split the track. As a dumb American,
+    I assume that the GPS is tracking in miles, and this distance is computed in miles.
+[max speed] when the GPS signal is bad, you can appear to virtually leap about. This filters out points where
+    the instantaneous speed is greater than the value you specify. As with [distance], this uses miles per hour.
+[time zone] this is used for localizing times. You have to specify it in one of the weird PHP-compatible codes,
+    such as "America/Los_Angeles" or "Etc/GMT-8"
